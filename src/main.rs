@@ -1,16 +1,17 @@
 #![feature(backtrace)]
 
-use std::fmt::Display;
-use std::net::{TcpListener, TcpStream, ToSocketAddrs, Shutdown};
-use std::process::exit;
-use std::io::{Read, Write, BufReader, BufRead, Error};
-use thread_pool::ThreadPool;
 use log::LevelFilter;
+use std::fmt::Display;
+use std::io::{BufRead, BufReader, Error, Write};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::process::exit;
+use thread_pool::ThreadPool;
 
-mod methods;
+mod request;
 
 // TODO config file
 // TODO log level
+// TODO more robust error handling
 
 fn main() {
     simple_logging::log_to_stderr(LevelFilter::Debug);
@@ -43,26 +44,27 @@ where
 
 fn handle_request(stream: &mut TcpStream) {
     let input = read_request(stream).unwrap();
-    let request = methods::Request::parse(&input).unwrap();
+    let request = request::Request::parse(&input).unwrap();
 
-    let _bytes_written = stream.write(b"Good Job!").unwrap();
+    let _bytes_written = stream.write_all(b"<h1>Good Job!</h1>").unwrap();
     stream.flush().unwrap();
     stream.shutdown(Shutdown::Both).unwrap();
 
-    log::debug!("{:?}", request)
+    log::debug!("{}", request)
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<String, Error>  {
+fn read_request(stream: &mut TcpStream) -> Result<String, Error> {
     let mut buf = String::new();
     let reader = BufReader::new(stream.try_clone().unwrap());
 
     log::debug!("{:?}", reader);
 
+    // TODO remove unwrap here
     for line in reader.lines().map(|l| l.unwrap()) {
-        if line != "" {
+        if !line.is_empty() {
             buf.push_str(&format!("{}\r\n", &line))
         } else {
-            break
+            break;
         }
     }
 

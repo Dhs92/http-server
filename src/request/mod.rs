@@ -1,7 +1,7 @@
-use std::fmt;
-use std::error;
 use std::backtrace::Backtrace;
 use std::collections::HashMap;
+use std::error;
+use std::fmt;
 
 #[derive(Debug)]
 pub enum Method {
@@ -24,11 +24,11 @@ pub struct Request<'a> {
     method: Method,
     resource: &'a str,
     version: Option<&'a str>,
-    headers: HashMap<String, String>
+    headers: HashMap<String, String>,
 }
 
 impl fmt::Display for Method {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error>{
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         let result = match self {
             Method::GET => "GET".to_owned(),
             Method::PUT => "PUT".to_owned(),
@@ -39,7 +39,6 @@ impl fmt::Display for Method {
         };
 
         write!(f, "{}", result)
-
     }
 }
 // TODO remove backtrace
@@ -56,19 +55,22 @@ impl Method {
             _ => {
                 let backtrace = Backtrace::capture();
                 Err(ParseError::InvalidMethod(backtrace))
-            },
+            }
         }
     }
 }
 
 impl<'a> fmt::Display for Request<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-
         if let Some(version) = self.version {
-            write!(f, "{} {} {}\r\n", self.method, self.resource, version)
+            write!(f, "{} {} {}\r\n", self.method, self.resource, version).unwrap();
+            for (key, field) in &self.headers {
+                write!(f, "{}: {}\r\n", key, field).unwrap();
+            }
         } else {
-            write!(f, "{} {}\r\n", self.method, self.resource)
+            write!(f, "{} {}\r\n", self.method, self.resource).unwrap();
         }
+        Ok(())
     }
 }
 
@@ -79,9 +81,7 @@ impl<'a> Request<'a> {
 
         let result = Self {
             method: match tokens.next() {
-                Some(method) =>{
-                    Method::parse(method)? 
-                },
+                Some(method) => Method::parse(method)?,
                 None => return Err(ParseError::InvalidInput),
             },
             resource: match tokens.next() {
@@ -92,18 +92,19 @@ impl<'a> Request<'a> {
                 Some(version) => Some(version),
                 None => None,
             },
-            headers: { // TODO sort out issues with recollecting the string
+            headers: {
                 for line in request.split("\r\n").skip(1) {
                     if !line.is_empty() {
                         let tokens = line.splitn(2, ": ").collect::<Vec<_>>();
-                        //log::debug!("Line: {}", line);
+
                         log::debug!("Tokens: {:?}", tokens);
+
                         headers.insert(tokens[0].to_owned(), tokens[1].to_owned());
                     }
                 }
 
                 headers
-            }
+            },
         };
 
         Ok(result)
@@ -120,7 +121,7 @@ impl<'a> error::Error for ParseError {
     fn backtrace(&self) -> Option<&Backtrace> {
         match self {
             ParseError::InvalidMethod(b) => Some(b),
-            ParseError::InvalidInput => None
+            ParseError::InvalidInput => None,
         }
     }
 }
