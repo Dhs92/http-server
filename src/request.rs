@@ -63,7 +63,7 @@ impl Method {
 impl<'a> fmt::Display for Request<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         if let Some(version) = self.version {
-            write!(f, "{} {} {}\r\n", self.method, self.resource, version).unwrap();
+            write!(f, "{} {} {}\r\n", self.method, self.resource, version).unwrap(); // TODO unwrap bad
             for (key, field) in &self.headers {
                 write!(f, "{}: {}\r\n", key, field).unwrap();
             }

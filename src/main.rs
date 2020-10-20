@@ -8,6 +8,7 @@ use std::process::exit;
 use thread_pool::ThreadPool;
 
 mod request;
+mod response;
 
 // TODO config file
 // TODO log level
