@@ -5,6 +5,8 @@ use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::process::exit;
 use thread_pool::ThreadPool;
 
+const SERVER_NAME: &str = "hyper";
+
 mod request;
 mod response;
 
@@ -43,9 +45,17 @@ where
 
 fn handle_request(stream: &mut TcpStream) {
     let input = read_request(stream).unwrap();
-    let request = request::Request::parse(&input).unwrap();
+    let (request, response) = request::Request::parse(&input).unwrap();
 
-    stream.write_all(b"<h1>Good Job!</h1>").unwrap();
+    stream
+        .write_all(
+            format!(
+                "{}\r\nServer: {}\r\n\r\n<h1>Uh-oh, Not Found!</h1>",
+                response, SERVER_NAME
+            )
+            .as_bytes(),
+        )
+        .unwrap();
     stream.flush().unwrap();
     stream.shutdown(Shutdown::Both).unwrap();
 
