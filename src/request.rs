@@ -1,3 +1,4 @@
+use crate::response;
 use std::collections::HashMap;
 use std::error;
 use std::fmt;
@@ -51,9 +52,7 @@ impl Method {
             "POST" => Ok(Self::Post),
             "DELETE" => Ok(Self::Delete),
             "OPTIONS" => Ok(Self::Options),
-            _ => {
-                Err(ParseError::InvalidMethod)
-            }
+            _ => Err(ParseError::InvalidMethod),
         }
     }
 }
@@ -61,14 +60,14 @@ impl Method {
 impl<'a> fmt::Display for Request<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         if let Some(version) = self.version {
-            write!(f, "{} {} {}\r\n", self.method, self.resource, version).unwrap(); // TODO unwrap bad
+            writeln!(f, "{} {} {}\r", self.method, self.resource, version)?; // TODO unwrap bad
             for (key, field) in &self.headers {
-                write!(f, "{}: {}\r\n", key, field).unwrap();
+                writeln!(f, "{}: {}\r", key, field)?;
             }
         } else {
-            write!(f, "{} {}\r\n", self.method, self.resource).unwrap();
+            writeln!(f, "{} {}\r", self.method, self.resource)?;
             for (key, field) in &self.headers {
-                write!(f, "{}: {}\r\n", key, field).unwrap();
+                writeln!(f, "{}: {}\r", key, field)?;
             }
         }
         Ok(())
@@ -76,7 +75,7 @@ impl<'a> fmt::Display for Request<'a> {
 }
 
 impl<'a> Request<'a> {
-    pub fn parse(request: &'a str) -> Result<Self, ParseError> {
+    pub fn parse(request: &'a str) -> Result<(Self, response::ResponseCode), ParseError> {
         let mut tokens = request.split_ascii_whitespace();
         let mut headers = HashMap::new();
 
@@ -98,7 +97,7 @@ impl<'a> Request<'a> {
                     if !line.is_empty() {
                         let tokens = line.splitn(2, ": ").collect::<Vec<_>>();
 
-                        log::debug!("Tokens: {:?}", tokens);
+                        log::debug!("Header: {:?}", tokens);
 
                         headers.insert(tokens[0].to_owned(), tokens[1].to_owned());
                     }
@@ -108,7 +107,7 @@ impl<'a> Request<'a> {
             },
         };
 
-        Ok(result)
+        Ok((result, response::ResponseCode::NotFound))
     }
 }
 
