@@ -1,21 +1,20 @@
-use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::error;
 use std::fmt;
 
 #[derive(Debug)]
 pub enum Method {
-    GET,
-    PUT,
-    HEAD,
-    POST,
-    DELETE,
-    OPTIONS,
+    Get,
+    Put,
+    Head,
+    Post,
+    Delete,
+    Options,
 }
 
 #[derive(Debug)]
 pub enum ParseError {
-    InvalidMethod(Backtrace),
+    InvalidMethod,
     InvalidInput,
 }
 
@@ -30,12 +29,12 @@ pub struct Request<'a> {
 impl fmt::Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         let result = match self {
-            Method::GET => "GET".to_owned(),
-            Method::PUT => "PUT".to_owned(),
-            Method::HEAD => "HEAD".to_owned(),
-            Method::POST => "POST".to_owned(),
-            Method::DELETE => "DELETE".to_owned(),
-            Method::OPTIONS => "OPTIONS".to_owned(),
+            Method::Get => "GET".to_owned(),
+            Method::Put => "PUT".to_owned(),
+            Method::Head => "HEAD".to_owned(),
+            Method::Post => "POST".to_owned(),
+            Method::Delete => "DELETE".to_owned(),
+            Method::Options => "OPTIONS".to_owned(),
         };
 
         write!(f, "{}", result)
@@ -46,15 +45,14 @@ impl Method {
     fn parse(method: &str) -> Result<Self, ParseError> {
         let method = method.trim_start().trim_end();
         match method {
-            "GET" => Ok(Self::GET),
-            "PUT" => Ok(Self::PUT),
-            "HEAD" => Ok(Self::HEAD),
-            "POST" => Ok(Self::POST),
-            "DELETE" => Ok(Self::DELETE),
-            "OPTIONS" => Ok(Self::OPTIONS),
+            "GET" => Ok(Self::Get),
+            "PUT" => Ok(Self::Put),
+            "HEAD" => Ok(Self::Head),
+            "POST" => Ok(Self::Post),
+            "DELETE" => Ok(Self::Delete),
+            "OPTIONS" => Ok(Self::Options),
             _ => {
-                let backtrace = Backtrace::capture();
-                Err(ParseError::InvalidMethod(backtrace))
+                Err(ParseError::InvalidMethod)
             }
         }
     }
@@ -69,6 +67,9 @@ impl<'a> fmt::Display for Request<'a> {
             }
         } else {
             write!(f, "{} {}\r\n", self.method, self.resource).unwrap();
+            for (key, field) in &self.headers {
+                write!(f, "{}: {}\r\n", key, field).unwrap();
+            }
         }
         Ok(())
     }
@@ -117,11 +118,4 @@ impl<'a> fmt::Display for ParseError {
     }
 }
 
-impl<'a> error::Error for ParseError {
-    fn backtrace(&self) -> Option<&Backtrace> {
-        match self {
-            ParseError::InvalidMethod(b) => Some(b),
-            ParseError::InvalidInput => None,
-        }
-    }
-}
+impl<'a> error::Error for ParseError {}

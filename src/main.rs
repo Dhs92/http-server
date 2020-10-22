@@ -1,5 +1,3 @@
-#![feature(backtrace)]
-
 use log::LevelFilter;
 use std::fmt::Display;
 use std::io::{BufRead, BufReader, Error, Write};
@@ -47,7 +45,7 @@ fn handle_request(stream: &mut TcpStream) {
     let input = read_request(stream).unwrap();
     let request = request::Request::parse(&input).unwrap();
 
-    let _bytes_written = stream.write_all(b"<h1>Good Job!</h1>").unwrap();
+    stream.write_all(b"<h1>Good Job!</h1>").unwrap();
     stream.flush().unwrap();
     stream.shutdown(Shutdown::Both).unwrap();
 
