@@ -38,26 +38,41 @@ where
         Err(e) => {
             log::error!("Failed to bind {}: {}", addr, e);
 
-            exit(0x420);
+            exit(0x420)
         }
     }
 }
 
 fn handle_request(stream: &mut TcpStream) {
-    let input = read_request(stream).unwrap();
+    let input = match read_request(stream) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("Failed to read from stream: {}", e);
+            return;
+        }
+    };
+
     let (request, response) = request::Request::parse(&input).unwrap();
 
-    stream
-        .write_all(
-            format!(
-                "{}\r\nServer: {}\r\n\r\n<h1>Uh-oh, Not Found!</h1>",
-                response, SERVER_NAME
-            )
-            .as_bytes(),
+    match stream.write_all(
+        format!(
+            "{}\r\nServer: {}\r\n\r\n<h1>Uh-oh, Not Found!</h1>",
+            response, SERVER_NAME
         )
-        .unwrap();
-    stream.flush().unwrap();
-    stream.shutdown(Shutdown::Both).unwrap();
+        .as_bytes(),
+    ) {
+        Ok(_) => (),
+        Err(e) => log::error!("Failed to write to socket: {}", e),
+    }
+
+    match stream.flush() {
+        Ok(_) => (),
+        Err(e) => log::error!("Failed to flush stream: {}", e),
+    }
+    match stream.shutdown(Shutdown::Both) {
+        Ok(_) => (),
+        Err(e) => log::error!("Failed to shutdown stream: {}", e),
+    }
 
     log::debug!("{}", request)
 }
