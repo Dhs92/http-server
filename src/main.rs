@@ -5,8 +5,9 @@ use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::process::exit;
 use thread_pool::ThreadPool;
 
-const SERVER_NAME: &str = "hyper";
+const SERVER_NAME: &str = "trash";
 
+mod config;
 mod request;
 mod response;
 
