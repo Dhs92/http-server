@@ -10,3 +10,5 @@ edition = "2018"
 thread-pool = {git = "https://github.com/Dhs92/thread_pool/", branch = "main"}
 log = "*"
 simple-logging = "*"
+serde = {version = "*", features = ["derive"]}
+serde_json = "*"
