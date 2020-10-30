@@ -14,7 +14,7 @@ pub enum Method {
 }
 
 #[derive(Debug)]
-pub enum ParseError {
+pub enum RequestError {
     InvalidMethod,
     InvalidInput,
 }
@@ -43,7 +43,7 @@ impl fmt::Display for Method {
 }
 // TODO remove backtrace
 impl Method {
-    fn parse(method: &str) -> Result<Self, ParseError> {
+    fn parse(method: &str) -> Result<Self, RequestError> {
         let method = method.trim_start().trim_end();
         match method {
             "GET" => Ok(Self::Get),
@@ -52,7 +52,7 @@ impl Method {
             "POST" => Ok(Self::Post),
             "DELETE" => Ok(Self::Delete),
             "OPTIONS" => Ok(Self::Options),
-            _ => Err(ParseError::InvalidMethod),
+            _ => Err(RequestError::InvalidMethod),
         }
     }
 }
@@ -75,18 +75,18 @@ impl<'a> fmt::Display for Request<'a> {
 }
 
 impl<'a> Request<'a> {
-    pub fn parse(request: &'a str) -> Result<(Self, response::ResponseCode), ParseError> {
+    pub fn parse(request: &'a str) -> Result<(Self, response::ResponseCode), RequestError> {
         let mut tokens = request.split_ascii_whitespace();
         let mut headers = HashMap::new();
 
         let result = Self {
             method: match tokens.next() {
                 Some(method) => Method::parse(method)?,
-                None => return Err(ParseError::InvalidInput),
+                None => return Err(RequestError::InvalidInput),
             },
             resource: match tokens.next() {
                 Some(resource) => resource,
-                None => return Err(ParseError::InvalidInput),
+                None => return Err(RequestError::InvalidInput),
             },
             version: match tokens.next() {
                 Some(version) => Some(version),
@@ -111,10 +111,10 @@ impl<'a> Request<'a> {
     }
 }
 
-impl<'a> fmt::Display for ParseError {
+impl<'a> fmt::Display for RequestError {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "{:#?}", self)
     }
 }
 
-impl<'a> error::Error for ParseError {}
+impl<'a> error::Error for RequestError {}
