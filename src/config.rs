@@ -3,14 +3,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, PartialOrd, PartialEq)]
 pub struct Config {
     address: String,
+    port: u16,
     thread_count: usize,
     #[serde(with = "serde_level_filter")]
     log_level: log::LevelFilter,
 }
 
 impl Config {
-    pub fn address(&self) -> &str {
-        &self.address
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.address, self.port)
     }
 
     pub fn thread_count(&self) -> usize {
@@ -19,6 +20,17 @@ impl Config {
 
     pub fn log_level(&self) -> log::LevelFilter {
         self.log_level
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0".to_string(),
+            port: 80,
+            thread_count: 25,
+            log_level: log::LevelFilter::Warn,
+        }
     }
 }
 

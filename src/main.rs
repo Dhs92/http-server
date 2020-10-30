@@ -1,11 +1,29 @@
+use config::Config;
 use log::LevelFilter;
+use serde_json::from_reader;
 use std::fmt::Display;
+#[cfg(not(debug_assertions))]
+use std::fs::create_dir;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Error, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::process::exit;
 use thread_pool::ThreadPool;
 
 const SERVER_NAME: &str = "trash";
+const CONFIG_NAME: &str = "config.json";
+
+#[cfg(not(debug_assertions))]
+const CONFIG_PATH: &str = if cfg!(linux) {
+    "/etc/http-server"
+} else if cfg!(windows) {
+    "C:\\Program Files\\Common Files\\http-server\\"
+} else {
+    "config.json"
+};
+
+#[cfg(debug_assertions)]
+const CONFIG_PATH: &str = "./";
 
 mod config;
 mod request;
@@ -16,11 +34,44 @@ mod response;
 // TODO more robust error handling
 
 fn main() {
-    simple_logging::log_to_stderr(LevelFilter::Debug);
+    simple_logging::log_to_stderr(LevelFilter::Error);
+    #[cfg(not(debug_assertions))]
+    match create_dir(CONFIG_PATH) {
+        Ok(_) => log::debug!("Created config directory: {}", CONFIG_PATH),
+        Err(e) => log::error!("Could not create config directory: {}", e),
+    }
 
-    let thread_pool = ThreadPool::new(15); // TODO get worker count from config
+    let mut config_file = match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(format!("{}/{}", CONFIG_PATH, CONFIG_NAME))
+    {
+        Ok(conf_file) => conf_file,
+        Err(e) => {
+            log::error!("Unable to create {}: {}", CONFIG_NAME, e);
+            exit(-0x1)
+        }
+    };
 
-    let listener = bind("127.0.0.1:8080");
+    if let Ok(config_meta) = config_file.metadata() {
+        if config_meta.len() < 75 {
+            config_file
+                .write_all(
+                    serde_json::to_string_pretty(&Config::default())
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .unwrap();
+        }
+    }
+
+    let config = load_config(config_file);
+    simple_logging::log_to_stderr(config.log_level());
+
+    let thread_pool = ThreadPool::new(config.thread_count());
+
+    let listener = bind(&config.address());
 
     for stream in listener.incoming() {
         match stream {
@@ -39,7 +90,7 @@ where
         Err(e) => {
             log::error!("Failed to bind {}: {}", addr, e);
 
-            exit(0x420)
+            exit(-0x420)
         }
     }
 }
@@ -94,4 +145,14 @@ fn read_request(stream: &mut TcpStream) -> Result<String, Error> {
     }
 
     Ok(buf)
+}
+
+fn load_config(reader: File) -> config::Config {
+    match from_reader::<File, config::Config>(reader) {
+        Ok(config) => config,
+        Err(e) => {
+            log::error!("Failed to read config file: {}", e);
+            exit(-0x69)
+        }
+    }
 }
