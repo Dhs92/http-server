@@ -1,4 +1,7 @@
+use crate::config;
 use serde::{Deserialize, Serialize};
+use serde_json::from_reader;
+use std::{fs::File, process::exit};
 
 #[derive(Debug, Deserialize, Serialize, PartialOrd, PartialEq)]
 pub struct Config {
@@ -20,6 +23,16 @@ impl Config {
 
     pub fn log_level(&self) -> log::LevelFilter {
         self.log_level
+    }
+
+    pub fn load_config(reader: File) -> config::Config {
+        match from_reader::<File, config::Config>(reader) {
+            Ok(config) => config,
+            Err(e) => {
+                log::error!("Failed to read config file: {}", e);
+                exit(-0x69)
+            }
+        }
     }
 }
 
