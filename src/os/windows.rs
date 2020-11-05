@@ -1,20 +1,22 @@
 use crate::config::Config;
-use crate::SERVER_NAME;
 use crate::handle_request;
-use thread_pool::ThreadPool;
+use crate::SERVER_NAME;
+use std::error::Error;
 use std::ffi::CString;
 use std::fmt::Display;
+#[cfg(not(debug_assertions))]
+use std::fs::create_dir;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::mem::{size_of, size_of_val};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::os::windows::io::{AsRawSocket, FromRawSocket};
 use std::process::exit;
+use thread_pool::ThreadPool;
 use winapi::ctypes::c_void;
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::ntdef::{FALSE, NULL};
 use winapi::um::{
-    errhandlingapi::GetLastError,
     fileapi::{CreateFileA, ReadFile, WriteFile, OPEN_EXISTING},
     handleapi::CloseHandle,
     minwinbase::OVERLAPPED,
@@ -29,6 +31,9 @@ use winapi::um::{
         TokenElevation, FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, HANDLE, TOKEN_ELEVATION, TOKEN_QUERY,
     },
 };
+
+#[path = "windows/pipe.rs"]
+mod pipe;
 
 #[cfg(not(debug_assertions))]
 const CONFIG_PATH: &str = "C:\\Program Files\\Common Files\\http-server\\";
@@ -50,17 +55,46 @@ pub enum PipeType {
     Message,
 }
 
-enum PipeCheck {
-    Pipe(HANDLE),
-    Invalid(DWORD), // error code
+pub struct Handle(HANDLE);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if self.0 != NULL {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
 }
+
+// impl Deref for Handle {
+//     type Target = HANDLE;
+
+//     fn deref(&self) -> &Self::Target {
+//         &self.0
+//     }
+// }
+
+impl Handle {
+    fn into_raw(self) -> *mut c_void {
+        self.0
+    }
+}
+
+enum HandleCheck<E: Error> {
+    Valid(Handle),
+    Invalid(E), // error code
+}
+
+type TokenCheck<E> = HandleCheck<E>;
+type PipeCheck<E> = HandleCheck<E>;
 
 // TODO error handling instead of unwraps
 pub fn start() {
     simple_logging::log_to_stderr(log::LevelFilter::Error);
     #[cfg(not(debug_assertions))]
     match create_dir(CONFIG_PATH) {
-        Ok(_) => log::debug!("Created config directory: {}", CONFIG_PATH),
+        Ok(_) => (),
         Err(e) => log::error!("Could not create config directory: {}", e),
     }
 
@@ -95,13 +129,13 @@ pub fn start() {
     let pipe_name = CString::new(format!("\\\\.\\pipe\\{}", SERVER_NAME)).unwrap(); // COULD FAIL IF UNICODE PASSED
 
     let mut listener;
-    if is_elevated() {
+    if is_elevated().unwrap() { // TODO match
         listener = bind(&config.address());
         let mut in_buf = bincode::serialize(&listener.as_raw_socket()).unwrap(); // shouldn't fail for any reason
         let handle = open_pipe(pipe_name);
         write_pipe(handle, &mut in_buf);
     } else {
-        // TODO read from pipe
+        // TODO elevate after pipe creation
         let pipe = create_pipe(
             pipe_name,
             PipeDirection::Duplex,
@@ -113,15 +147,15 @@ pub fn start() {
         );
 
         let pipe = match pipe {
-            PipeCheck::Pipe(p) => p,
+            PipeCheck::Valid(p) => p,
             PipeCheck::Invalid(err) => {
-                log::error!("Unable to create pipe, error code: {:0X}", err);
-                exit(err as i32)
+                log::error!("Unable to create pipe: {}", err);
+                exit(err.raw_os_error().unwrap())
             }
         };
 
         let mut out_buf = [0; 4096];
-        read_pipe(pipe, &mut out_buf);
+        read_pipe(pipe.into_raw(), &mut out_buf);
 
         let listener_raw = bincode::deserialize(&out_buf).unwrap();
         listener = unsafe { TcpListener::from_raw_socket(listener_raw) };
@@ -132,7 +166,6 @@ pub fn start() {
     let thread_pool = ThreadPool::new(config.thread_count());
 
     listen(&mut listener, &thread_pool)
-
 }
 
 fn bind<A>(addr: A) -> TcpListener
@@ -166,7 +199,7 @@ fn create_pipe(
     out_buffer_size: DWORD,
     in_buffer_size: DWORD,
     default_timeout: DWORD,
-) -> PipeCheck {
+) -> PipeCheck<IoError> {
     let pipe_access = match open_mode {
         PipeDirection::Duplex => PIPE_ACCESS_DUPLEX,
         PipeDirection::Inbound => PIPE_ACCESS_INBOUND,
@@ -191,11 +224,11 @@ fn create_pipe(
         );
     }
 
-    let error = unsafe { GetLastError() };
-    if error != 0 {
+    let error = IoError::last_os_error();
+    if error.raw_os_error().is_some() {
         PipeCheck::Invalid(error)
     } else {
-        PipeCheck::Pipe(handle)
+        PipeCheck::Valid(Handle(handle))
     }
 }
 
@@ -205,7 +238,7 @@ pub fn open_pipe(pipe_name: CString) -> HANDLE {
         CreateFileA(
             pipe_name.as_ptr(),
             GENERIC_WRITE,
-            0,
+            0, // use default timeout
             &mut SECURITY_ATTRIBUTES::default(),
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
@@ -214,6 +247,7 @@ pub fn open_pipe(pipe_name: CString) -> HANDLE {
     }
 }
 
+// Take PipeCheck instead
 pub fn write_pipe(pipe: HANDLE, in_buf: &mut [u8]) -> u32 {
     let mut bytes_written = 0;
     let mut overlap = OVERLAPPED::default();
@@ -231,6 +265,7 @@ pub fn write_pipe(pipe: HANDLE, in_buf: &mut [u8]) -> u32 {
     bytes_written
 }
 
+// Take PipeCheck instead
 pub fn read_pipe(pipe: HANDLE, out_buf: &mut [u8]) -> u32 {
     let mut bytes_read = 0;
     let mut overlap = OVERLAPPED::default();
@@ -249,37 +284,39 @@ pub fn read_pipe(pipe: HANDLE, out_buf: &mut [u8]) -> u32 {
 }
 
 #[rustfmt::skip]
-fn is_elevated() -> bool {
-    let mut is_elevated = false;
+fn is_elevated() -> IoResult<bool> {
     let mut token: HANDLE = NULL;
+    let mut token_check = TokenCheck::Invalid(IoError::new(ErrorKind::Other, "default"));
     let mut elevation: TOKEN_ELEVATION = TOKEN_ELEVATION::default();
-    let mut check = true;
     let mut size: DWORD = 0;
 
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == (FALSE as i32) {
-        log::error!("Failed to get Process Token: {}", unsafe { GetLastError() });
-        check = false;
+        token_check = TokenCheck::Invalid(IoError::last_os_error())
     }
+
+    if token != NULL { token_check = TokenCheck::<IoError>::Valid(Handle(token)); }
+
+    let token = match token_check {
+        TokenCheck::Valid(token) => token,
+        TokenCheck::Invalid(err) => {
+            log::error!("Failed to get Process Token: {}", err);
+            
+            return Err(err)
+        }
+    };
+    
 
     if unsafe {
         let elevation_ptr = &mut elevation as *mut _ as *mut c_void;
         let elevation_size = size_of_val(&elevation) as u32;
-        GetTokenInformation(token, TokenElevation, elevation_ptr, elevation_size, &mut size)
-    } == (FALSE as i32) && !check
+        GetTokenInformation(token.into_raw(), TokenElevation, elevation_ptr, elevation_size, &mut size)
+    } == (FALSE as i32)
     {
-        log::error!("Failed to get Token Information: {}", unsafe {
-            GetLastError()
-        });
-        check = false
-    }
+        let err = IoError::last_os_error();
+        log::error!("Failed to get Token Information: {}", err);
 
-    if check {
-        is_elevated = elevation.TokenIsElevated != 0
+        return Err(err)
     }
-
-    if token != NULL {
-        unsafe { CloseHandle(token) };
-    }
-
-    is_elevated
+    
+    Ok(elevation.TokenIsElevated != 0)
 }
