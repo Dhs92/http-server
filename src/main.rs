@@ -3,10 +3,17 @@ use std::net::{Shutdown, TcpStream};
 
 const SERVER_NAME: &str = "trash";
 
+// workaround for Rust Analyzer not supporting cfg_attr
 mod config;
-#[cfg_attr(windows, path = "os/windows.rs")]
-#[cfg_attr(target_os = "linux", path = "os/linux.rs")]
-mod os;
+#[path = "os/windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows as os;
+#[cfg(target_os = "linux")]
+#[path = "os/linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as os;
 mod request;
 mod response;
 
