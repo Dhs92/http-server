@@ -285,10 +285,10 @@ pub fn read_pipe(pipe: HANDLE, out_buf: &mut [u8]) -> u32 {
 
 #[rustfmt::skip]
 fn is_elevated() -> IoResult<bool> {
-    let mut token: HANDLE = NULL;
+    let mut token = NULL;
     let mut token_check = TokenCheck::Invalid(IoError::new(ErrorKind::Other, "default"));
-    let mut elevation: TOKEN_ELEVATION = TOKEN_ELEVATION::default();
-    let mut size: DWORD = 0;
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut size = 0;
 
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == (FALSE as i32) {
         token_check = TokenCheck::Invalid(IoError::last_os_error())
