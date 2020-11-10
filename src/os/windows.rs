@@ -42,6 +42,13 @@ const CONFIG_PATH: &str = "./";
 
 const CONFIG_NAME: &str = "config.json";
 
+/// Equivalent to:
+///
+/// ```C
+/// PIPE_ACCESS_DUPLEX,
+/// PIPE_ACCESS_INBOUND,
+/// PIPE_ACCESS_OUTBOUND
+/// ```
 #[allow(dead_code)]
 pub enum PipeDirection {
     Duplex,
@@ -59,7 +66,7 @@ pub struct Handle(HANDLE);
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        if self.0 != NULL {
+        if !self.0.is_null() {
             unsafe {
                 CloseHandle(self.0);
             }
@@ -67,27 +74,30 @@ impl Drop for Handle {
     }
 }
 
-// impl Deref for Handle {
-//     type Target = HANDLE;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
 
 impl Handle {
-    fn into_raw(self) -> *mut c_void {
+    fn into_raw(self) -> HANDLE {
         self.0
     }
 }
 
-enum HandleCheck<E: Error> {
+pub enum HandleCheck<E: Error> {
     Valid(Handle),
     Invalid(E), // error code
 }
 
-type TokenCheck<E> = HandleCheck<E>;
-type PipeCheck<E> = HandleCheck<E>;
+impl HandleCheck<IoError> {
+    pub fn validate(handle: HANDLE) -> Self {
+        if !handle.is_null() {
+            Self::Valid(Handle(handle))
+        } else {
+            Self::Invalid(IoError::last_os_error())
+        }
+    }
+}
+
+pub type TokenCheck<E> = HandleCheck<E>;
+pub type PipeCheck<E> = HandleCheck<E>;
 
 // TODO error handling instead of unwraps
 pub fn start() {
@@ -129,7 +139,8 @@ pub fn start() {
     let pipe_name = CString::new(format!("\\\\.\\pipe\\{}", SERVER_NAME)).unwrap(); // COULD FAIL IF UNICODE PASSED
 
     let mut listener;
-    if is_elevated().unwrap() { // TODO match
+    if is_elevated().unwrap() {
+        // TODO match
         listener = bind(&config.address());
         let mut in_buf = bincode::serialize(&listener.as_raw_socket()).unwrap(); // shouldn't fail for any reason
         let handle = open_pipe(pipe_name);
@@ -146,16 +157,8 @@ pub fn start() {
             0, // value of 0 means default timeout
         );
 
-        let pipe = match pipe {
-            PipeCheck::Valid(p) => p,
-            PipeCheck::Invalid(err) => {
-                log::error!("Unable to create pipe: {}", err);
-                exit(err.raw_os_error().unwrap())
-            }
-        };
-
-        let mut out_buf = [0; 4096];
-        read_pipe(pipe.into_raw(), &mut out_buf);
+        let mut out_buf = [0; 8];
+        read_pipe(pipe, &mut out_buf);
 
         let listener_raw = bincode::deserialize(&out_buf).unwrap();
         listener = unsafe { TcpListener::from_raw_socket(listener_raw) };
@@ -193,14 +196,14 @@ pub fn listen(listener: &mut TcpListener, thread_pool: &ThreadPool) {
 
 fn create_pipe(
     name: CString,
-    open_mode: PipeDirection,
+    pipe_direction: PipeDirection,
     pipe_type: PipeType,
     max_instances: DWORD,
     out_buffer_size: DWORD,
     in_buffer_size: DWORD,
     default_timeout: DWORD,
 ) -> PipeCheck<IoError> {
-    let pipe_access = match open_mode {
+    let pipe_access = match pipe_direction {
         PipeDirection::Duplex => PIPE_ACCESS_DUPLEX,
         PipeDirection::Inbound => PIPE_ACCESS_INBOUND,
         PipeDirection::Outbound => PIPE_ACCESS_OUTBOUND,
@@ -224,18 +227,13 @@ fn create_pipe(
         );
     }
 
-    let error = IoError::last_os_error();
-    if error.raw_os_error().is_some() {
-        PipeCheck::Invalid(error)
-    } else {
-        PipeCheck::Valid(Handle(handle))
-    }
+    PipeCheck::validate(handle)
 }
 
-// TODO convert to CreateFile
-pub fn open_pipe(pipe_name: CString) -> HANDLE {
+pub fn open_pipe(pipe_name: CString) -> PipeCheck<IoError> {
+    let handle;
     unsafe {
-        CreateFileA(
+        handle = CreateFileA(
             pipe_name.as_ptr(),
             GENERIC_WRITE,
             0, // use default timeout
@@ -245,16 +243,25 @@ pub fn open_pipe(pipe_name: CString) -> HANDLE {
             NULL,
         )
     }
+
+    PipeCheck::validate(handle)
 }
 
-// Take PipeCheck instead
-pub fn write_pipe(pipe: HANDLE, in_buf: &mut [u8]) -> u32 {
+pub fn write_pipe(pipe: PipeCheck<IoError>, in_buf: &mut [u8]) -> u32 {
     let mut bytes_written = 0;
     let mut overlap = OVERLAPPED::default();
 
+    let pipe = match pipe {
+        PipeCheck::Valid(p) => p,
+        PipeCheck::Invalid(e) => {
+            log::error!("Unable to read pipe: {}", e);
+            exit(e.raw_os_error().unwrap())
+        }
+    };
+
     unsafe {
         WriteFile(
-            pipe,
+            pipe.into_raw(),
             in_buf.as_mut_ptr() as *mut c_void,
             in_buf.len() as u32,
             &mut bytes_written,
@@ -265,14 +272,21 @@ pub fn write_pipe(pipe: HANDLE, in_buf: &mut [u8]) -> u32 {
     bytes_written
 }
 
-// Take PipeCheck instead
-pub fn read_pipe(pipe: HANDLE, out_buf: &mut [u8]) -> u32 {
+pub fn read_pipe(pipe: PipeCheck<IoError>, out_buf: &mut [u8]) -> u32 {
     let mut bytes_read = 0;
     let mut overlap = OVERLAPPED::default();
 
+    let pipe = match pipe {
+        PipeCheck::Valid(p) => p,
+        PipeCheck::Invalid(e) => {
+            log::error!("Unable to read pipe: {}", e);
+            exit(e.raw_os_error().unwrap())
+        }
+    };
+
     unsafe {
         ReadFile(
-            pipe,
+            pipe.into_raw(),
             out_buf.as_mut_ptr() as *mut c_void,
             size_of::<DWORD>() as u32,
             &mut bytes_read,
@@ -286,15 +300,12 @@ pub fn read_pipe(pipe: HANDLE, out_buf: &mut [u8]) -> u32 {
 #[rustfmt::skip]
 fn is_elevated() -> IoResult<bool> {
     let mut token = NULL;
-    let mut token_check = TokenCheck::Invalid(IoError::new(ErrorKind::Other, "default"));
     let mut elevation = TOKEN_ELEVATION::default();
     let mut size = 0;
 
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == (FALSE as i32) {
-        token_check = TokenCheck::Invalid(IoError::last_os_error())
-    }
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token); }
 
-    if token != NULL { token_check = TokenCheck::<IoError>::Valid(Handle(token)); }
+    let token_check = TokenCheck::validate(token);
 
     let token = match token_check {
         TokenCheck::Valid(token) => token,
@@ -320,3 +331,4 @@ fn is_elevated() -> IoResult<bool> {
     
     Ok(elevation.TokenIsElevated != 0)
 }
+
