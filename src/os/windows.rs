@@ -1,39 +1,27 @@
 use crate::config::Config;
 use crate::handle_request;
-use crate::SERVER_NAME;
-use std::error::Error;
-use std::ffi::CString;
-use std::fmt::Display;
-#[cfg(not(debug_assertions))]
-use std::fs::create_dir;
-use std::fs::OpenOptions;
-use std::io::{Error as IoError, ErrorKind, Result as IoResult, Write};
+use raw_sync::{events::*, Timeout};
+use shared_memory::{Shmem, ShmemConf, ShmemError};
+use std::{io::ErrorKind, fs::OpenOptions};
+use std::io::{Error as IoError, Result as IoResult, Write};
 use std::mem::{size_of, size_of_val};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::os::windows::io::{AsRawSocket, FromRawSocket};
 use std::process::exit;
+use std::time::Duration;
+use std::{ffi::CString, fmt::Display};
+#[cfg(not(debug_assertions))]
+use std::{fs::create_dir, mem};
 use thread_pool::ThreadPool;
-use winapi::ctypes::c_void;
-use winapi::shared::minwindef::DWORD;
-use winapi::shared::ntdef::{FALSE, NULL};
+use winapi::shared::ntdef::{FALSE, NULL, TRUE};
 use winapi::um::{
-    fileapi::{CreateFileA, ReadFile, WriteFile, OPEN_EXISTING},
     handleapi::CloseHandle,
-    minwinbase::OVERLAPPED,
-    minwinbase::SECURITY_ATTRIBUTES,
     processthreadsapi::{GetCurrentProcess, OpenProcessToken},
     securitybaseapi::GetTokenInformation,
-    winbase::{
-        CreateNamedPipeA, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
-        PIPE_TYPE_BYTE, PIPE_TYPE_MESSAGE,
-    },
-    winnt::{
-        TokenElevation, FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, HANDLE, TOKEN_ELEVATION, TOKEN_QUERY,
-    },
+    shellapi::ShellExecuteA,
+    winnt::{TokenElevation, HANDLE, TOKEN_ELEVATION, TOKEN_QUERY},
 };
-
-#[path = "windows/pipe.rs"]
-mod pipe;
+use winapi::{ctypes::c_void, shared::windef::HWND};
 
 #[cfg(not(debug_assertions))]
 const CONFIG_PATH: &str = "C:\\Program Files\\Common Files\\http-server\\";
@@ -42,51 +30,36 @@ const CONFIG_PATH: &str = "./";
 
 const CONFIG_NAME: &str = "config.json";
 
-/// Equivalent to:
-///
-/// ```C
-/// PIPE_ACCESS_DUPLEX,
-/// PIPE_ACCESS_INBOUND,
-/// PIPE_ACCESS_OUTBOUND
-/// ```
-#[allow(dead_code)]
-pub enum PipeDirection {
-    Duplex,
-    Inbound,
-    Outbound,
-}
-
-#[allow(dead_code)]
-pub enum PipeType {
-    Byte,
-    Message,
-}
-
+#[derive(Debug)]
 pub struct Handle(HANDLE);
 
 impl Drop for Handle {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe {
+                log::debug!("Dropping HANDLE!");
                 CloseHandle(self.0);
+                self.0 = NULL;
             }
         }
     }
 }
 
-
 impl Handle {
     fn into_raw(self) -> HANDLE {
-        self.0
+        // would drop value at the end of the function, but copy the pointer's address before doing so
+        let handle = std::mem::ManuallyDrop::new(self);
+        handle.0
     }
 }
 
-pub enum HandleCheck<E: Error> {
+#[derive(Debug)]
+pub enum HandleCheck {
     Valid(Handle),
-    Invalid(E), // error code
+    Invalid(IoError), // error code
 }
 
-impl HandleCheck<IoError> {
+impl HandleCheck {
     pub fn validate(handle: HANDLE) -> Self {
         if !handle.is_null() {
             Self::Valid(Handle(handle))
@@ -96,10 +69,10 @@ impl HandleCheck<IoError> {
     }
 }
 
-pub type TokenCheck<E> = HandleCheck<E>;
-pub type PipeCheck<E> = HandleCheck<E>;
+pub type TokenCheck = HandleCheck;
 
-// TODO error handling instead of unwraps
+// Need way to separate shared mem handle names for multiple server instances
+// Look into RPC?
 pub fn start() {
     simple_logging::log_to_stderr(log::LevelFilter::Error);
     #[cfg(not(debug_assertions))]
@@ -134,37 +107,56 @@ pub fn start() {
     }
 
     let config = Config::load_config(config_file);
-
-    let handle_size = size_of::<HANDLE>() as u32;
-    let pipe_name = CString::new(format!("\\\\.\\pipe\\{}", SERVER_NAME)).unwrap(); // COULD FAIL IF UNICODE PASSED
+    simple_logging::log_to_stderr(config.log_level());
 
     let mut listener;
-    if is_elevated().unwrap() {
+    let mut shmem = init_shared_mem();
+    let elevated = is_elevated().unwrap(); // If this fails, we want to panic. Should NOT fail
+    if elevated && !shmem.is_owner() {
         // TODO match
+        let (evt, _) = unsafe { Event::from_existing(shmem.as_ptr()).unwrap() };
         listener = bind(&config.address());
-        let mut in_buf = bincode::serialize(&listener.as_raw_socket()).unwrap(); // shouldn't fail for any reason
-        let handle = open_pipe(pipe_name);
-        write_pipe(handle, &mut in_buf);
+        let shared_mem = unsafe { shmem.as_slice_mut() }; 
+        // need to duplicate socket after copying
+        let in_buf = &mut bincode::serialize(&listener.as_raw_socket()).unwrap(); // shouldn't fail for any reason
+        // Event should be at the front of the buffer, so skip over the number of bytes an Event takes up
+        for (serialized, mem) in in_buf
+            .iter()
+            .zip(shared_mem.iter_mut().skip(size_of::<Event>()))
+        {
+            *mem = *serialized
+        }
+
+        // Tell parent process that the buffer is no longer in use
+        evt.set(EventState::Signaled).unwrap();
+
+        exit(0)
+    } else if !elevated && shmem.is_owner() {
+        let (evt, _) = unsafe { Event::new(shmem.as_ptr(), true).unwrap() };
+
+        elevate();
+
+        match evt.wait(Timeout::Val(Duration::from_secs(30))) {
+            Ok(_) => (),
+            Err(e) => {
+                log::error!("Timed out while binding address: {}", e);
+
+                exit(65)
+            }
+        }
+        drop(std::net::TcpListener::bind("255.255.255.255:0"));
+
+        // TODO elevate
+        let out_buf = unsafe { shmem.as_slice() };
+
+        let listener_raw = bincode::deserialize(out_buf).unwrap();
+        listener = unsafe { TcpListener::from_raw_socket(listener_raw) }; // not infallible
+        log::debug!("{:?}", listener)
     } else {
-        // TODO elevate after pipe creation
-        let pipe = create_pipe(
-            pipe_name,
-            PipeDirection::Duplex,
-            PipeType::Byte,
-            2, // max instances
-            handle_size,
-            handle_size,
-            0, // value of 0 means default timeout
-        );
+        log::error!("An unknown error has occured");
 
-        let mut out_buf = [0; 8];
-        read_pipe(pipe, &mut out_buf);
-
-        let listener_raw = bincode::deserialize(&out_buf).unwrap();
-        listener = unsafe { TcpListener::from_raw_socket(listener_raw) };
+        exit(444)
     }
-
-    simple_logging::log_to_stderr(config.log_level());
 
     let thread_pool = ThreadPool::new(config.thread_count());
 
@@ -189,126 +181,29 @@ pub fn listen(listener: &mut TcpListener, thread_pool: &ThreadPool) {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => thread_pool.execute(move || handle_request(&mut stream)),
-            Err(e) => log::warn!("Connection failed: {}", e),
+            Err(ek) if ek.raw_os_error().unwrap() == 10093 => {
+                log::error!("Listening Failed: {}", ek);
+                exit(-1)
+            }
+            Err(e) => {
+                log::warn!("Connection failed: {:?}", e);
+            }
         }
     }
-}
-
-fn create_pipe(
-    name: CString,
-    pipe_direction: PipeDirection,
-    pipe_type: PipeType,
-    max_instances: DWORD,
-    out_buffer_size: DWORD,
-    in_buffer_size: DWORD,
-    default_timeout: DWORD,
-) -> PipeCheck<IoError> {
-    let pipe_access = match pipe_direction {
-        PipeDirection::Duplex => PIPE_ACCESS_DUPLEX,
-        PipeDirection::Inbound => PIPE_ACCESS_INBOUND,
-        PipeDirection::Outbound => PIPE_ACCESS_OUTBOUND,
-    };
-    let pipe_mode = match pipe_type {
-        PipeType::Byte => PIPE_TYPE_BYTE,
-        PipeType::Message => PIPE_TYPE_MESSAGE,
-    };
-
-    let handle;
-    unsafe {
-        handle = CreateNamedPipeA(
-            name.as_ptr(),
-            pipe_access,
-            pipe_mode,
-            max_instances,
-            out_buffer_size,
-            in_buffer_size,
-            default_timeout,
-            &mut SECURITY_ATTRIBUTES::default(),
-        );
-    }
-
-    PipeCheck::validate(handle)
-}
-
-pub fn open_pipe(pipe_name: CString) -> PipeCheck<IoError> {
-    let handle;
-    unsafe {
-        handle = CreateFileA(
-            pipe_name.as_ptr(),
-            GENERIC_WRITE,
-            0, // use default timeout
-            &mut SECURITY_ATTRIBUTES::default(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            NULL,
-        )
-    }
-
-    PipeCheck::validate(handle)
-}
-
-pub fn write_pipe(pipe: PipeCheck<IoError>, in_buf: &mut [u8]) -> u32 {
-    let mut bytes_written = 0;
-    let mut overlap = OVERLAPPED::default();
-
-    let pipe = match pipe {
-        PipeCheck::Valid(p) => p,
-        PipeCheck::Invalid(e) => {
-            log::error!("Unable to read pipe: {}", e);
-            exit(e.raw_os_error().unwrap())
-        }
-    };
-
-    unsafe {
-        WriteFile(
-            pipe.into_raw(),
-            in_buf.as_mut_ptr() as *mut c_void,
-            in_buf.len() as u32,
-            &mut bytes_written,
-            &mut overlap,
-        );
-    }
-
-    bytes_written
-}
-
-pub fn read_pipe(pipe: PipeCheck<IoError>, out_buf: &mut [u8]) -> u32 {
-    let mut bytes_read = 0;
-    let mut overlap = OVERLAPPED::default();
-
-    let pipe = match pipe {
-        PipeCheck::Valid(p) => p,
-        PipeCheck::Invalid(e) => {
-            log::error!("Unable to read pipe: {}", e);
-            exit(e.raw_os_error().unwrap())
-        }
-    };
-
-    unsafe {
-        ReadFile(
-            pipe.into_raw(),
-            out_buf.as_mut_ptr() as *mut c_void,
-            size_of::<DWORD>() as u32,
-            &mut bytes_read,
-            &mut overlap,
-        );
-    }
-
-    bytes_read
 }
 
 #[rustfmt::skip]
 fn is_elevated() -> IoResult<bool> {
     let mut token = NULL;
     let mut elevation = TOKEN_ELEVATION::default();
-    let mut size = 0;
+    let mut size = size_of::<TOKEN_ELEVATION>() as u32;
 
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token); }
 
     let token_check = TokenCheck::validate(token);
 
     let token = match token_check {
-        TokenCheck::Valid(token) => token,
+        TokenCheck::Valid(token) => { log::debug!("Token Ptr: {:?}, {}", token, IoError::last_os_error()); token },
         TokenCheck::Invalid(err) => {
             log::error!("Failed to get Process Token: {}", err);
             
@@ -320,6 +215,7 @@ fn is_elevated() -> IoResult<bool> {
     if unsafe {
         let elevation_ptr = &mut elevation as *mut _ as *mut c_void;
         let elevation_size = size_of_val(&elevation) as u32;
+        log::debug!("Token Ptr: {:?}", token);
         GetTokenInformation(token.into_raw(), TokenElevation, elevation_ptr, elevation_size, &mut size)
     } == (FALSE as i32)
     {
@@ -332,3 +228,73 @@ fn is_elevated() -> IoResult<bool> {
     Ok(elevation.TokenIsElevated != 0)
 }
 
+fn init_shared_mem() -> Shmem {
+    let bind_path = "binding";
+
+    match ShmemConf::new()
+        .size(get_buf_size())
+        .flink(bind_path)
+        .create()
+    {
+        Ok(m) => m,
+        Err(ShmemError::LinkExists) => match ShmemConf::new().flink(bind_path).open() {
+            Ok(m) => m,
+            Err(e) => {
+                log::error!("Could not open memory mapping: {}", e);
+
+                exit(51)
+            }
+        },
+        Err(e) => {
+            log::error!("Could not create memory mapping: {}", e);
+
+            exit(52)
+        }
+    }
+}
+
+const fn get_buf_size() -> usize {
+    size_of::<u64>() + size_of::<Event>()
+}
+
+fn elevate() {
+    shell_execute_a(
+        None,
+        CString::new("runas").unwrap(),
+        CString::new("http-server.exe").unwrap(),
+        CString::new("").unwrap(),
+        CString::new(".\\").unwrap(),
+        10,
+    )
+    .unwrap();
+}
+
+fn shell_execute_a(
+    hwnd: Option<HWND>,
+    operation: CString,
+    file_name: CString,
+    param: CString,
+    dir: CString,
+    show_cmd: i32,
+) -> IoResult<Handle> {
+    let hwnd = match hwnd {
+        Some(hwnd) => hwnd,
+        None => NULL as HWND,
+    };
+
+    let handle = unsafe {
+        ShellExecuteA(
+            hwnd,
+            operation.as_ptr(),
+            file_name.as_ptr(),
+            param.as_ptr(),
+            dir.as_ptr(),
+            show_cmd,
+        )
+    };
+
+    match HandleCheck::validate(handle as *mut c_void) {
+        HandleCheck::Valid(h) => Ok(h),
+        HandleCheck::Invalid(e) => Err(e),
+    }
+}
