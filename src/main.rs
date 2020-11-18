@@ -1,12 +1,13 @@
+use std::env;
 use std::io::{BufRead, BufReader, Error, Write};
 use std::net::{Shutdown, TcpStream};
-
 const SERVER_NAME: &str = "trash";
 
 // workaround for Rust Analyzer not supporting cfg_attr
 mod config;
 #[path = "os/windows.rs"]
 mod windows;
+//use config::Config;
 #[cfg(windows)]
 use windows as os;
 #[cfg(target_os = "linux")]
@@ -22,7 +23,17 @@ mod response;
 // TODO more robust error handling
 
 fn main() {
-    os::start();
+    let args = env::args().collect::<Vec<_>>();
+
+    let mut pid = None;
+    let args = &args[1..];
+    if !args.is_empty() {
+        pid = match &*args[0] {
+            "--p" => Some(args[1].parse().unwrap()),
+            _ => None,
+        };
+    }
+    os::start(pid);
 }
 
 fn handle_request(stream: &mut TcpStream) {
@@ -55,8 +66,6 @@ fn handle_request(stream: &mut TcpStream) {
         Ok(_) => (),
         Err(e) => log::error!("Failed to shutdown stream: {}", e),
     }
-
-    log::debug!("{}", request)
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<String, Error> {
