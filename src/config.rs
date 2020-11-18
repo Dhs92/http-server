@@ -17,6 +17,10 @@ impl Config {
         format!("{}:{}", self.address, self.port)
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     pub fn thread_count(&self) -> usize {
         self.thread_count
     }
