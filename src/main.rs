@@ -1,3 +1,4 @@
+use os_impl::core::start;
 use std::env;
 use std::io::{BufRead, BufReader, Error, Write};
 use std::net::{Shutdown, TcpStream};
@@ -9,18 +10,21 @@ mod os {
     #[cfg(windows)]
     pub mod windows {
         pub mod core;
-        mod util;
+        pub mod utils {
+            pub mod handle;
+            pub mod proc;
+        }
         mod wsa;
     }
     #[cfg(target_os = "linux")]
     pub mod linux {}
 }
+mod request;
+mod response;
 #[cfg(target_os = "linux")]
 use linux as os_impl;
 #[cfg(windows)]
 use os::windows as os_impl;
-mod request;
-mod response;
 
 // TODO config file
 // TODO log level
@@ -37,7 +41,7 @@ fn main() {
             _ => None,
         };
     }
-    os_impl::core::start(pid);
+    start(pid);
 }
 
 fn handle_request(stream: &mut TcpStream) {

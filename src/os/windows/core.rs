@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::handle_request;
-use crate::os::windows::util::{get_process, get_process_pid};
 use nng::{Message, Protocol, Socket};
 use std::io::{Error as IoError, Result as IoResult, Write};
 use std::mem::{size_of, size_of_val};
@@ -10,22 +9,27 @@ use std::process::exit;
 use std::{ffi::CString, fmt::Display};
 #[cfg(not(debug_assertions))]
 use std::{fs::create_dir, mem};
-use std::{fs::OpenOptions, mem::ManuallyDrop, thread::sleep, time::Duration};
+use std::{fs::OpenOptions, thread::sleep, time::Duration};
 use thread_pool::ThreadPool;
 use winapi::{ctypes::c_void, shared::windef::HWND};
 use winapi::{
     shared::ntdef::{FALSE, NULL},
     um::{
-        handleapi::CloseHandle,
         processthreadsapi::{GetCurrentProcess, OpenProcessToken},
         securitybaseapi::GetTokenInformation,
         shellapi::ShellExecuteA,
-        winnt::{TokenElevation, HANDLE, TOKEN_ELEVATION, TOKEN_QUERY},
+        winnt::{TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
         winsock2::WSAPROTOCOL_INFOA,
     },
 };
 
-use super::wsa::{begin_socket_handoff, socket_handoff, WSAProcessInfo};
+use super::{
+    utils::{
+        handle::{Handle, HandleCheck, TokenCheck},
+        proc::{get_process, get_process_pid},
+    },
+    wsa::{begin_socket_handoff, socket_handoff, WSAProcessInfo},
+};
 
 #[cfg(not(debug_assertions))]
 const CONFIG_PATH: &str = "C:\\Program Files\\Common Files\\http-server\\";
@@ -33,46 +37,6 @@ const CONFIG_PATH: &str = "C:\\Program Files\\Common Files\\http-server\\";
 const CONFIG_PATH: &str = "./";
 
 const CONFIG_NAME: &str = "config.json";
-
-#[derive(Debug)]
-pub struct Handle(HANDLE);
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                CloseHandle(self.0);
-                self.0 = NULL;
-            }
-        }
-    }
-}
-
-impl Handle {
-    pub fn into_raw(self) -> HANDLE {
-        // would drop value at the end of the function, but copy the pointer's address before doing so
-        let handle = ManuallyDrop::new(self);
-        handle.0
-    }
-}
-
-#[derive(Debug)]
-pub enum HandleCheck {
-    Valid(Handle),
-    Invalid(IoError), // error code
-}
-
-impl HandleCheck {
-    pub fn validate(handle: HANDLE) -> Self {
-        if !handle.is_null() {
-            Self::Valid(Handle(handle))
-        } else {
-            Self::Invalid(IoError::last_os_error())
-        }
-    }
-}
-
-pub type TokenCheck = HandleCheck;
 
 pub fn start(pid: Option<u32>) {
     simple_logging::log_to_stderr(log::LevelFilter::Error);

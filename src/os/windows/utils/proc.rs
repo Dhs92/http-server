@@ -2,7 +2,7 @@ use std::process::exit;
 
 use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessId};
 
-use super::core::HandleCheck;
+use super::handle::HandleCheck;
 
 pub fn get_process() -> HandleCheck {
     let process = unsafe { GetCurrentProcess() };
