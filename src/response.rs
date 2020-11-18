@@ -55,6 +55,7 @@ impl fmt::Display for ResponseCode {
             Self::RequestTimeout => "408 Request Timeout",
         };
 
+        // TODO support different versions
         write!(f, "HTTP/1.0 {}", response_str)
     }
 }

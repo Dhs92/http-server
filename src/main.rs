@@ -5,16 +5,20 @@ const SERVER_NAME: &str = "trash";
 
 // workaround for Rust Analyzer not supporting cfg_attr
 mod config;
-#[path = "os/windows.rs"]
-mod windows;
-//use config::Config;
+mod os {
+    #[cfg(windows)]
+    pub mod windows {
+        pub mod core;
+        mod util;
+        mod wsa;
+    }
+    #[cfg(target_os = "linux")]
+    pub mod linux {}
+}
+#[cfg(target_os = "linux")]
+use linux as os_impl;
 #[cfg(windows)]
-use windows as os;
-#[cfg(target_os = "linux")]
-#[path = "os/linux.rs"]
-mod linux;
-#[cfg(target_os = "linux")]
-use linux as os;
+use os::windows as os_impl;
 mod request;
 mod response;
 
@@ -33,7 +37,7 @@ fn main() {
             _ => None,
         };
     }
-    os::start(pid);
+    os_impl::core::start(pid);
 }
 
 fn handle_request(stream: &mut TcpStream) {
@@ -45,7 +49,7 @@ fn handle_request(stream: &mut TcpStream) {
         }
     };
 
-    let (request, response) = request::Request::parse(&input).unwrap();
+    let (_request, response) = request::Request::parse(&input).unwrap();
 
     match stream.write_all(
         format!(
